@@ -135,7 +135,10 @@ This produces the Rust `rlib` and the C library (`libxkbcommon.dylib` on macOS,
 `libxkbcommon.so.0` on Linux.
 
 For `aarch64-unknown-linux-musl`, Rust's default static-musl configuration
-refuses to emit `cdylib`. Disable static crt so the shared library is built:
+refuses to emit `cdylib`. Disable static crt so the shared library is built.
+Rust then links its unwinder from `libgcc_s.so.1`; [`build.rs`](./build.rs)
+links the target's self-contained `libunwind.a` in its place, so the only
+`DT_NEEDED` entry is `libc.musl-aarch64.so.1`:
 
 ```sh
 RUSTFLAGS='-C target-feature=-crt-static' \
