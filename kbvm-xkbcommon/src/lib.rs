@@ -8,5 +8,6 @@
 pub mod abi;
 mod context;
 mod keymap;
+mod names;
 mod parse;
 mod state;

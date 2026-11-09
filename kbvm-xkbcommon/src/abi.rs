@@ -8,7 +8,10 @@
 
 use crate::context::ContextHandle;
 use crate::keymap::KeymapHandle;
+use crate::names::RuleNames;
 use crate::state::StateHandle;
+use kbvm::Keysym;
+use kbvm::state_machine::Direction;
 use libc::c_char;
 use libc::c_int;
 use libc::c_uint;
@@ -32,7 +35,44 @@ pub struct xkb_state {
     _private: [u8; 0],
 }
 
+#[repr(C)]
+pub struct xkb_rule_names {
+    pub rules: *const c_char,
+    pub model: *const c_char,
+    pub layout: *const c_char,
+    pub variant: *const c_char,
+    pub options: *const c_char,
+}
+
 const XKB_KEYMAP_FORMAT_TEXT_V1: c_int = 1;
+const XKB_KEY_DOWN: c_int = 1;
+const XKB_MOD_INVALID: u32 = u32::MAX;
+const XKB_LAYOUT_INVALID: u32 = u32::MAX;
+const XKB_LEVEL_INVALID: u32 = u32::MAX;
+
+/// # Safety
+///
+/// `ptr` must be null or point to a NUL-terminated string that stays valid
+/// for `'a`.
+unsafe fn optional_str<'a>(ptr: *const c_char) -> Option<&'a str> {
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: The caller guarantees a NUL-terminated string valid for `'a`.
+    unsafe { CStr::from_ptr(ptr) }.to_str().ok()
+}
+
+/// # Safety
+///
+/// `ptr` must be null or point to a NUL-terminated string that stays valid
+/// for `'a`.
+unsafe fn optional_bytes<'a>(ptr: *const c_char) -> Option<&'a [u8]> {
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: The caller guarantees a NUL-terminated string valid for `'a`.
+    Some(unsafe { CStr::from_ptr(ptr) }.to_bytes())
+}
 
 /// # Safety
 ///
@@ -169,6 +209,51 @@ pub extern "C" fn xkb_keymap_new_from_buffer(
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn xkb_keymap_new_from_string(
+    context: *mut xkb_context,
+    string: *const c_char,
+    format: c_int,
+    flags: c_int,
+) -> *mut xkb_keymap {
+    if string.is_null() {
+        return ptr::null_mut();
+    }
+    // SAFETY: The C contract requires `string` to be NUL-terminated.
+    let length = unsafe { CStr::from_ptr(string) }.to_bytes().len();
+    xkb_keymap_new_from_buffer(context, string, length, format, flags)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn xkb_keymap_new_from_names(
+    context: *mut xkb_context,
+    names: *const xkb_rule_names,
+    flags: c_int,
+) -> *mut xkb_keymap {
+    if context.is_null() || flags != 0 || context_ref(context).is_none() {
+        return ptr::null_mut();
+    }
+    // SAFETY: `names` is null or points to an `xkb_rule_names` whose strings
+    // are null or NUL-terminated for the duration of this call.
+    let names = match unsafe { names.as_ref() } {
+        None => RuleNames::default(),
+        Some(names) => unsafe {
+            RuleNames {
+                rules: optional_str(names.rules),
+                model: optional_str(names.model),
+                layout: optional_str(names.layout),
+                variant: optional_str(names.variant),
+                options: optional_str(names.options),
+            }
+        },
+    };
+    // SAFETY: The context pointer is non-null and live. The new keymap keeps
+    // the context alive through its own strong reference.
+    let context = unsafe { clone_arc(context as *mut ContextHandle) };
+    let keymap = crate::names::keymap_from_names(context, names);
+    Arc::into_raw(Arc::new(keymap)) as *mut KeymapHandle as *mut xkb_keymap
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn xkb_keymap_unref(keymap: *mut xkb_keymap) {
     // SAFETY: The pointer is null or a live keymap created by
     // `xkb_keymap_new_from_buffer` and this call releases its reference.
@@ -188,6 +273,34 @@ pub extern "C" fn xkb_keymap_max_keycode(keymap: *mut xkb_keymap) -> u32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn xkb_keymap_num_mods(keymap: *mut xkb_keymap) -> u32 {
     keymap_ref(keymap).map(|k| k.num_mods()).unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn xkb_keymap_mod_get_index(keymap: *mut xkb_keymap, name: *const c_char) -> u32 {
+    // SAFETY: The C contract requires `name` to be NUL-terminated.
+    let Some(name) = (unsafe { optional_bytes(name) }) else {
+        return XKB_MOD_INVALID;
+    };
+    keymap_ref(keymap)
+        .and_then(|k| k.mod_index(name))
+        .unwrap_or(XKB_MOD_INVALID)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn xkb_keymap_num_layouts(keymap: *mut xkb_keymap) -> u32 {
+    keymap_ref(keymap).map(|k| k.num_layouts()).unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn xkb_keymap_key_repeats(keymap: *mut xkb_keymap, keycode: u32) -> c_int {
+    keymap_ref(keymap)
+        .map(|k| c_int::from(k.key_repeats(keycode)))
+        .unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn xkb_keysym_to_utf32(keysym: u32) -> u32 {
+    Keysym(keysym).char().map_or(0, |c| c as u32)
 }
 
 #[unsafe(no_mangle)]
@@ -346,4 +459,71 @@ pub extern "C" fn xkb_state_mod_index_is_active(
         return -1;
     };
     state.mod_index_is_active(idx, affect as u32)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn xkb_state_update_key(state: *mut xkb_state, keycode: u32, direction: c_int) -> c_int {
+    let Some(state) = state_mut_ref(state) else {
+        return 0;
+    };
+    let direction = if direction == XKB_KEY_DOWN {
+        Direction::Down
+    } else {
+        Direction::Up
+    };
+    state.update_key(keycode, direction) as c_int
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn xkb_state_serialize_mods(state: *mut xkb_state, components: c_int) -> u32 {
+    state_ref(state)
+        .map(|s| s.serialize_mods(components as u32))
+        .unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn xkb_state_layout_index_is_active(
+    state: *mut xkb_state,
+    idx: u32,
+    components: c_int,
+) -> c_int {
+    state_ref(state)
+        .map(|s| s.layout_index_is_active(idx, components as u32))
+        .unwrap_or(-1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn xkb_state_led_name_is_active(state: *mut xkb_state, name: *const c_char) -> c_int {
+    // SAFETY: The C contract requires `name` to be NUL-terminated.
+    let Some(name) = (unsafe { optional_bytes(name) }) else {
+        return -1;
+    };
+    state_ref(state)
+        .map(|s| s.led_name_is_active(name))
+        .unwrap_or(-1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn xkb_state_key_get_layout(state: *mut xkb_state, keycode: u32) -> u32 {
+    state_ref(state)
+        .and_then(|s| s.key_get_layout(keycode))
+        .unwrap_or(XKB_LAYOUT_INVALID)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn xkb_state_key_get_level(state: *mut xkb_state, keycode: u32, layout: u32) -> u32 {
+    state_ref(state)
+        .and_then(|s| s.key_get_level(keycode, layout))
+        .unwrap_or(XKB_LEVEL_INVALID)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn xkb_state_mod_mask_remove_consumed(
+    state: *mut xkb_state,
+    keycode: u32,
+    mask: u32,
+) -> u32 {
+    state_ref(state)
+        .map(|s| s.mod_mask_remove_consumed(keycode, mask))
+        .unwrap_or(0)
 }

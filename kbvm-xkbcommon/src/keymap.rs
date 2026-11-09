@@ -2,6 +2,7 @@ use crate::context::ContextHandle;
 use crate::parse;
 use kbvm::Keysym;
 use kbvm::builder::Redirect;
+use kbvm::state_machine::StateMachine;
 use kbvm::xkb::Keymap;
 use kbvm::xkb::diagnostic::WriteToLog;
 use std::collections::HashMap;
@@ -12,8 +13,10 @@ pub(crate) struct KeymapHandle {
     #[allow(dead_code)]
     pub(crate) context: Arc<ContextHandle>,
     pub(crate) keymap: Keymap,
+    pub(crate) state_machine: StateMachine,
     pub(crate) keys: HashMap<u32, KeyInfo>,
     pub(crate) mods: Vec<ModInfo>,
+    pub(crate) led_names: Vec<String>,
     pub(crate) min_keycode: u32,
     pub(crate) max_keycode: u32,
     pub(crate) num_groups: u32,
@@ -26,6 +29,7 @@ pub(crate) struct ModInfo {
 
 pub(crate) struct KeyInfo {
     pub(crate) redirect: Redirect,
+    pub(crate) repeats: bool,
     pub(crate) groups: Vec<Option<GroupInfo>>,
 }
 
@@ -172,6 +176,10 @@ impl KeymapHandle {
             .kbvm_context()
             .keymap_from_bytes(WriteToLog, None, text)
             .ok()?;
+        Some(Self::from_compiled(context, keymap, text))
+    }
+
+    pub(crate) fn from_compiled(context: Arc<ContextHandle>, keymap: Keymap, text: &[u8]) -> Self {
         let mut keys = HashMap::new();
         let mut num_groups = 0u32;
         for key in keymap.keys() {
@@ -181,6 +189,7 @@ impl KeymapHandle {
                 key.keycode().raw(),
                 KeyInfo {
                     redirect: key.redirect(),
+                    repeats: key.repeats(),
                     groups,
                 },
             );
@@ -227,15 +236,45 @@ impl KeymapHandle {
                 });
             }
         }
-        Some(Self {
+        let led_names = keymap
+            .indicators()
+            .map(|indicator| indicator.name().to_string())
+            .collect();
+        let state_machine = keymap.to_builder().build_state_machine();
+        Self {
             context,
             keymap,
+            state_machine,
             keys,
             mods,
+            led_names,
             min_keycode,
             max_keycode,
             num_groups,
-        })
+        }
+    }
+
+    pub(crate) fn in_keycode_range(&self, keycode: u32) -> bool {
+        (self.min_keycode..=self.max_keycode).contains(&keycode)
+    }
+
+    pub(crate) fn num_layouts(&self) -> u32 {
+        self.num_groups
+    }
+
+    pub(crate) fn mod_index(&self, name: &[u8]) -> Option<u32> {
+        self.mods
+            .iter()
+            .position(|m| m.name.as_bytes() == name)
+            .map(|idx| idx as u32)
+    }
+
+    pub(crate) fn led_index(&self, name: &[u8]) -> Option<usize> {
+        self.led_names.iter().position(|led| led.as_bytes() == name)
+    }
+
+    pub(crate) fn key_repeats(&self, keycode: u32) -> bool {
+        self.in_keycode_range(keycode) && self.keys.get(&keycode).is_some_and(|key| key.repeats)
     }
 
     pub(crate) fn num_mods(&self) -> u32 {

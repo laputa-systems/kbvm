@@ -7,29 +7,44 @@ Wayland client (Chromium 142 in the bctl browser appliance) can link against
 
 ## Symbols
 
-The cdylib exports exactly the symbols Chromium 142 imports:
+The cdylib exports exactly the 33 symbols the Chromium 142 browser closure
+imports: the 20 that `chromium` itself imports, and the 13 more that GTK's
+`libgdk-3.so.0` imports when Chromium loads it (`nm -D --undefined-only`).
 
 ```
-xkb_context_new
-xkb_context_unref
-xkb_context_include_path_append
-xkb_keymap_new_from_buffer
-xkb_keymap_unref
-xkb_keymap_min_keycode
-xkb_keymap_max_keycode
-xkb_keymap_num_mods
-xkb_keymap_mod_get_name
-xkb_keymap_num_layouts_for_key
-xkb_keymap_num_levels_for_key
-xkb_keymap_key_get_syms_by_level
-xkb_state_new
-xkb_state_unref
-xkb_state_get_keymap
-xkb_state_update_mask
-xkb_state_key_get_one_sym
-xkb_state_key_get_syms
-xkb_state_key_get_utf32
-xkb_state_mod_index_is_active
+xkb_context_new                     chromium, libgdk-3
+xkb_context_unref                   chromium, libgdk-3
+xkb_context_include_path_append     chromium
+xkb_keymap_new_from_buffer          chromium
+xkb_keymap_new_from_string          libgdk-3
+xkb_keymap_new_from_names           libgdk-3
+xkb_keymap_unref                    chromium, libgdk-3
+xkb_keymap_min_keycode              chromium, libgdk-3
+xkb_keymap_max_keycode              chromium, libgdk-3
+xkb_keymap_num_mods                 chromium
+xkb_keymap_mod_get_name             chromium
+xkb_keymap_mod_get_index            libgdk-3
+xkb_keymap_num_layouts              libgdk-3
+xkb_keymap_num_layouts_for_key      chromium, libgdk-3
+xkb_keymap_num_levels_for_key       chromium, libgdk-3
+xkb_keymap_key_get_syms_by_level    chromium, libgdk-3
+xkb_keymap_key_repeats              libgdk-3
+xkb_keysym_to_utf32                 libgdk-3
+xkb_state_new                       chromium, libgdk-3
+xkb_state_unref                     chromium, libgdk-3
+xkb_state_get_keymap                chromium
+xkb_state_update_mask               chromium, libgdk-3
+xkb_state_update_key                libgdk-3
+xkb_state_serialize_mods            libgdk-3
+xkb_state_key_get_one_sym           chromium, libgdk-3
+xkb_state_key_get_syms              chromium
+xkb_state_key_get_utf32             chromium
+xkb_state_key_get_layout            libgdk-3
+xkb_state_key_get_level             libgdk-3
+xkb_state_mod_index_is_active       chromium
+xkb_state_layout_index_is_active    libgdk-3
+xkb_state_led_name_is_active        libgdk-3
+xkb_state_mod_mask_remove_consumed  libgdk-3
 ```
 
 No other `xkb_*` symbols are defined. The C declarations match
@@ -40,12 +55,17 @@ No other `xkb_*` symbols are defined. The C declarations match
 The implementation targets the client side of `wl_keyboard`:
 
 1. The compositor sends a keymap as a text buffer (`XKB_KEYMAP_FORMAT_TEXT_V1`).
-2. The client calls `xkb_keymap_new_from_buffer` and `xkb_state_new`.
+2. The client calls `xkb_keymap_new_from_buffer` (Chromium) or
+   `xkb_keymap_new_from_string` (GDK) and `xkb_state_new`.
 3. Modifier masks from `wl_keyboard.modifiers` are fed through
-   `xkb_state_update_mask`; `xkb_state_update_key` is not needed.
+   `xkb_state_update_mask`.
 4. Keycodes are XKB keycodes (evdev + 8). Lookups use
    `xkb_state_key_get_one_sym`, `xkb_state_key_get_syms`,
    `xkb_state_key_get_utf32`, and `xkb_state_mod_index_is_active`.
+
+GDK also builds a keymap from RMLVO names when its Wayland display opens,
+before the compositor's keymap arrives, and asks `xkb_state_update_key` on a
+fresh state whether a key is a modifier.
 
 Reference counting matches libxkbcommon:
 
@@ -58,19 +78,51 @@ Reference counting matches libxkbcommon:
 - `_unref(NULL)` is a no-op.
 - Invalid keymap buffers, unsupported formats/flags, and out-of-range indices
   return `NULL`, `0`, or `-1` rather than crashing. NULL handles to the
-  keymap/state query functions return `0`/`NULL`; libxkbcommon leaves those
-  inputs undefined.
+  keymap/state query functions return `0`, `-1`, `NULL`, or the `*_INVALID`
+  index; libxkbcommon leaves those inputs undefined.
 
 The keymap text is assumed to be a fully resolved map as emitted by
-`xkb_keymap_get_as_string` (which is what Wayland compositors send). The
-keycode range and modifier order are read from the keymap text because
-`kbvm`'s public API does not expose them; a hand-written keymap that only
-makes sense through libxkbcommon's include resolution or its fallback to
-`types[0]` may differ. `xkb_context_include_path_append` still accepts an
-include path and it is used for keymap compilation, but the keycode range is
-not recomputed from included files. Unlike upstream, `xkb_context_new` does
-not fail when the default XKB data directories are absent; that is required
-for the appliance, which has no XKB data installed.
+`xkb_keymap_get_as_string` or by `kbvm`'s formatter (what a Wayland
+compositor sends). The keycode range and modifier order are read from the
+keymap text because `kbvm`'s public API does not expose them; a hand-written
+keymap that only makes sense through libxkbcommon's include resolution or its
+fallback to `types[0]` may differ. `xkb_context_include_path_append` still
+accepts an include path and it is used for keymap compilation, but the keycode
+range is not recomputed from included files.
+
+## Keymaps from names and the built-in US keymap
+
+`xkb_keymap_new_from_names` sanitizes the names like libxkbcommon (empty or
+NULL rules and model take the defaults, an empty layout takes the default
+layout and variant, NULL options take the default options, `XKB_DEFAULT_*`
+unless `XKB_CONTEXT_NO_ENVIRONMENT_NAMES`) and compiles them with `kbvm`.
+
+When the rules file cannot be found in the context's include paths, which is
+the case on a system without xkeyboard-config, it does not fail as upstream
+does. It returns the built-in evdev/pc105/us keymap,
+[`data/us.xkb`](./data/us.xkb), whatever names were requested, and writes
+
+```
+xkbcommon: WARNING: XKB rules 'evdev' not found in the include paths; using the built-in evdev/pc105/us keymap
+```
+
+to stderr. `xkb_context_new` likewise succeeds when the default XKB
+directories are absent. `data/us.xkb` is libxkbcommon's own serialization of
+evdev/pc105/us from xkeyboard-config 2.44, so the fallback behaves exactly like
+upstream's keymap for those names. Regenerate it with
+`cargo test -p kbvm-xkbcommon --test differential -- --ignored regenerate_builtin_us_keymap`.
+
+Known differences from upstream:
+
+- With rules present, `kbvm` orders virtual modifiers by name, so the indices
+  of virtual modifiers (8 and up) differ from upstream's declaration order.
+  Names, masks, and every lookup by name agree. Keymaps from text keep the
+  order of the text.
+- `xkb_state_update_key` runs `kbvm`'s state machine. For `LatchMods` with
+  `latchToLock`, pressing the key while its modifiers are latched locks them
+  on release; upstream locks on press. The state after the release is the
+  same. Mixing `xkb_state_update_key` and `xkb_state_update_mask` on one
+  state is unsupported, as upstream documents.
 
 ## Building
 
@@ -150,18 +202,30 @@ compares every exported function against it. The oracle must be libxkbcommon
 The suite builds keymaps with the oracle from RMLVO names (`us`, `de`, `fr`,
 `us(dvorak)`, `us(altgr-intl)` with `lv3:ralt_switch`, and `us(intl)` for dead
 keys) and asks the oracle to serialize them with `xkb_keymap_get_as_string`.
-Both implementations then receive the same text buffers. It compares:
+Both implementations then receive the same text buffers, and the same maps
+again after a round trip through `kbvm`'s formatter (the compositor's wire
+format). It compares, for every exported function:
 
-- keymap creation, trailing NUL handling, invalid buffers, formats, and flags;
-- min/max keycode, modifier count/names, layouts and levels for keycodes
-  0..=300 plus boundaries;
-- keysyms for every keycode 8..=255 at every layout and level;
-- `xkb_state_update_mask` return values and all key lookups and modifier
-  activity queries for masks covering none, Shift, Caps, Level3 (Mod5), Ctrl,
-  virtual modifiers, and multi-group states;
+- keymap creation from buffers, strings, and names, trailing NUL handling,
+  invalid buffers, formats, and flags;
+- min/max keycode, modifier count, names, and indices, layouts, levels,
+  keysyms, and key repeat for keycodes 0..=300 at every layout and level;
+- after `xkb_state_update_mask` for masks covering none, Shift, Caps, Level3
+  (Mod5), Ctrl, virtual modifiers, and multi-group states: serialized
+  modifiers, modifier, layout, and LED activity, key layout and level,
+  consumed-modifier removal, and all key lookups;
+- the same after every step of `xkb_state_update_key` sequences (Shift, two
+  Shifts, Caps Lock, Ctrl/Alt/Super, Level3, Num Lock, group toggle, mod and
+  group latches, unknown keys), and a single press on a fresh state for
+  every keycode;
+- `xkb_keymap_new_from_names` with xkeyboard-config present, and the built-in
+  keymap without it;
+- `xkb_keysym_to_utf32` over the Latin, Unicode, and vendor keysym ranges;
 - context include-path return values and NULL/unref behavior;
 - refcount balance and borrowed `xkb_state_get_keymap` pointers.
 
 Additional synthetic keymaps exercise sparse groups, multi-symbol levels,
-explicit types with fewer symbols than levels, and a keymap with no virtual
-modifiers.
+explicit types with fewer symbols than levels, a keymap with no virtual
+modifiers, and mod and group latches. The oracle tree defaults to
+`.work/src/xkc-install/<prefix>/share/X11/xkb`; set `KBVM_XKBCOMMON_XKB_ROOT`
+to use another.

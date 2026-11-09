@@ -2,8 +2,11 @@ use crate::keymap::KeymapHandle;
 use kbvm::Components;
 use kbvm::GroupDelta;
 use kbvm::GroupIndex;
+use kbvm::Keycode;
 use kbvm::Keysym;
 use kbvm::ModifierMask;
+use kbvm::state_machine;
+use kbvm::state_machine::Direction;
 use std::sync::Arc;
 
 const CAPS: u32 = 1 << 1;
@@ -30,6 +33,8 @@ pub(crate) struct StateHandle {
     pub(crate) locked_group: u32,
     pub(crate) group: u32,
     leds: Vec<bool>,
+    machine_state: state_machine::State,
+    events: Vec<state_machine::Event>,
 }
 
 struct Snapshot {
@@ -44,8 +49,43 @@ struct Snapshot {
     leds: Vec<bool>,
 }
 
+impl Snapshot {
+    fn changes(&self, next: &Snapshot) -> u32 {
+        let mut changes = 0;
+        if self.group != next.group {
+            changes |= LAYOUT_EFFECTIVE;
+        }
+        if self.base_group != next.base_group {
+            changes |= LAYOUT_DEPRESSED;
+        }
+        if self.latched_group != next.latched_group {
+            changes |= LAYOUT_LATCHED;
+        }
+        if self.locked_group != next.locked_group {
+            changes |= LAYOUT_LOCKED;
+        }
+        if self.mods != next.mods {
+            changes |= MODS_EFFECTIVE;
+        }
+        if self.base_mods != next.base_mods {
+            changes |= MODS_DEPRESSED;
+        }
+        if self.latched_mods != next.latched_mods {
+            changes |= MODS_LATCHED;
+        }
+        if self.locked_mods != next.locked_mods {
+            changes |= MODS_LOCKED;
+        }
+        if self.leds != next.leds {
+            changes |= LEDS;
+        }
+        changes
+    }
+}
+
 impl StateHandle {
     pub(crate) fn new(keymap: Arc<KeymapHandle>) -> Self {
+        let machine_state = keymap.state_machine.create_state();
         let mut state = Self {
             keymap,
             base_mods: 0,
@@ -57,6 +97,8 @@ impl StateHandle {
             locked_group: 0,
             group: 0,
             leds: Vec::new(),
+            machine_state,
+            events: Vec::new(),
         };
         state.leds = state.active_leds();
         state
@@ -137,43 +179,108 @@ impl StateHandle {
         self.locked_mods |= self.resolve_mods(self.locked_mods);
         self.base_group = base_group;
         self.latched_group = latched_group;
-        self.locked_group = wrap_group(locked_group as i32, self.keymap.num_groups);
-        let sum = (base_group as i32)
-            .wrapping_add(latched_group as i32)
+        self.locked_group = locked_group;
+        self.update_derived();
+        prev.changes(&self.snapshot())
+    }
+
+    pub(crate) fn update_key(&mut self, keycode: u32, direction: Direction) -> u32 {
+        if !self.keymap.in_keycode_range(keycode) {
+            return 0;
+        }
+        let prev = self.snapshot();
+        let mut components = self.components();
+        self.events.clear();
+        self.keymap.state_machine.handle_key(
+            &mut self.machine_state,
+            &mut self.events,
+            Keycode::from_x11(keycode),
+            direction,
+        );
+        for event in self.events.drain(..) {
+            components.apply_event(event);
+        }
+        self.base_mods = components.mods_pressed.0;
+        self.latched_mods = components.mods_latched.0;
+        self.locked_mods = components.mods_locked.0;
+        self.base_group = components.group_pressed.0;
+        self.latched_group = components.group_latched.0;
+        self.locked_group = components.group_locked.0;
+        self.update_derived();
+        prev.changes(&self.snapshot())
+    }
+
+    fn update_derived(&mut self) {
+        self.locked_group = wrap_group(self.locked_group as i32, self.keymap.num_groups);
+        let sum = (self.base_group as i32)
+            .wrapping_add(self.latched_group as i32)
             .wrapping_add(self.locked_group as i32);
         self.group = wrap_group(sum, self.keymap.num_groups);
         self.mods = self.base_mods | self.latched_mods | self.locked_mods;
         self.leds = self.active_leds();
-        let next = self.snapshot();
-        let mut changes = 0;
-        if prev.group != next.group {
-            changes |= LAYOUT_EFFECTIVE;
+    }
+
+    pub(crate) fn serialize_mods(&self, components: u32) -> u32 {
+        if components & MODS_EFFECTIVE != 0 {
+            return self.mods;
         }
-        if prev.base_group != next.base_group {
-            changes |= LAYOUT_DEPRESSED;
+        let mut mask = 0;
+        if components & MODS_DEPRESSED != 0 {
+            mask |= self.base_mods;
         }
-        if prev.latched_group != next.latched_group {
-            changes |= LAYOUT_LATCHED;
+        if components & MODS_LATCHED != 0 {
+            mask |= self.latched_mods;
         }
-        if prev.locked_group != next.locked_group {
-            changes |= LAYOUT_LOCKED;
+        if components & MODS_LOCKED != 0 {
+            mask |= self.locked_mods;
         }
-        if prev.mods != next.mods {
-            changes |= MODS_EFFECTIVE;
+        mask
+    }
+
+    pub(crate) fn layout_index_is_active(&self, idx: u32, components: u32) -> i32 {
+        if idx >= self.keymap.num_groups {
+            return -1;
         }
-        if prev.base_mods != next.base_mods {
-            changes |= MODS_DEPRESSED;
+        let active = (components & LAYOUT_EFFECTIVE != 0 && self.group == idx)
+            || (components & LAYOUT_DEPRESSED != 0 && self.base_group == idx)
+            || (components & LAYOUT_LATCHED != 0 && self.latched_group == idx)
+            || (components & LAYOUT_LOCKED != 0 && self.locked_group == idx);
+        i32::from(active)
+    }
+
+    pub(crate) fn led_name_is_active(&self, name: &[u8]) -> i32 {
+        match self.keymap.led_index(name) {
+            Some(idx) => i32::from(self.leds[idx]),
+            None => -1,
         }
-        if prev.latched_mods != next.latched_mods {
-            changes |= MODS_LATCHED;
+    }
+
+    pub(crate) fn key_get_layout(&self, keycode: u32) -> Option<u32> {
+        let key = self.keymap.keys.get(&keycode)?;
+        key.layout(self.group).map(|layout| layout as u32)
+    }
+
+    pub(crate) fn key_get_level(&self, keycode: u32, layout: u32) -> Option<u32> {
+        let key = self.keymap.keys.get(&keycode)?;
+        if layout as usize >= key.groups.len() {
+            return None;
         }
-        if prev.locked_mods != next.locked_mods {
-            changes |= MODS_LOCKED;
+        let group = key.group(layout as usize)?;
+        Some(group.ty.level_and_consumed(self.mods).0 as u32)
+    }
+
+    pub(crate) fn mod_mask_remove_consumed(&self, keycode: u32, mask: u32) -> u32 {
+        if !self.keymap.in_keycode_range(keycode) {
+            return 0;
         }
-        if prev.leds != next.leds {
-            changes |= LEDS;
-        }
-        changes
+        let effective = self.resolve_mods(mask);
+        let consumed = self
+            .keymap
+            .keys
+            .get(&keycode)
+            .and_then(|key| key.group(key.layout(self.group)?))
+            .map_or(0, |group| group.ty.level_and_consumed(self.mods).1);
+        effective & !consumed
     }
 
     pub(crate) fn key_get_syms(&self, keycode: u32) -> Option<&[u32]> {
