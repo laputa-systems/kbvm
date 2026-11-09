@@ -1,0 +1,15 @@
+[package]
+name = "kbvm-xkbcommon"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95.0"
+license = "MIT OR Apache-2.0"
+description = "A drop-in libxkbcommon subset implemented on top of kbvm"
+
+[lib]
+name = "xkbcommon"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+kbvm = { path = "../kbvm" }
+libc = "0.2"

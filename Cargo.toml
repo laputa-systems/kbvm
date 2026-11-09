@@ -9,6 +9,7 @@ members = [
     "kbvm-benches",
     "kbvm-cli",
     "kbvm-proc",
+    "kbvm-xkbcommon",
     "libxkbcommon-test-linker",
     "type-tests",
     "x11-tests",
