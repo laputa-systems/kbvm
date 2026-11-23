@@ -195,7 +195,7 @@ pub extern "C" fn xkb_keymap_new_from_buffer(
     }
     // SAFETY: The C contract requires `buffer` to point to `length` readable
     // bytes.
-    let mut text = unsafe { std::slice::from_raw_parts(buffer as *const u8, length) };
+    let mut text = unsafe { std::slice::from_raw_parts(buffer.cast::<u8>(), length) };
     if let Some((0, rest)) = text.split_last() {
         text = rest;
     }
