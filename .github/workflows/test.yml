@@ -29,7 +29,7 @@ jobs:
       - name: build libxkbcommon
         run: |
           sudo apt-get update
-          sudo apt-get install -y meson ninja-build bison libxml2-dev xkb-data xsltproc
+          sudo apt-get install -y meson ninja-build bison pkg-config libxml2-dev libx11-data xkb-data xsltproc
           meson setup libxkbcommon/build libxkbcommon -Ddefault_library=static -Denable-x11=false -Denable-wayland=false
           ninja -C libxkbcommon/build libxkbcommon.a
       - name: build test oracle
@@ -45,4 +45,5 @@ jobs:
       - name: test
         env:
           KBVM_XKBCOMMON_XKB_ROOT: "${{ github.workspace }}/.work/src/xkc-install/share/X11/xkb"
+          PKG_CONFIG_PATH: "${{ github.workspace }}/.work/src/xkc-install/share/pkgconfig"
         run: make test

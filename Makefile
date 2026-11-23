@@ -8,7 +8,7 @@ lint:
 	cargo clippy --workspace $(LINT_EXCLUDE) --all-targets -- --deny warnings
 
 test:
-	cargo test --workspace
+	cargo test --workspace --all-features
 
 clean:
 	cargo clean
