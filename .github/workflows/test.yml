@@ -1,0 +1,48 @@
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions: {}
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.head_ref || github.run_id }}"
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-26.04-arm
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: true
+      - name: build libxkbcommon
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build bison libxml2-dev xkb-data xsltproc
+          meson setup libxkbcommon/build libxkbcommon -Ddefault_library=static -Denable-x11=false -Denable-wayland=false
+          ninja -C libxkbcommon/build libxkbcommon.a
+      - name: build test oracle
+        run: |
+          mkdir -p .work/src
+          git clone --depth 1 --branch xkbcommon-1.9.2 https://github.com/xkbcommon/libxkbcommon .work/src/libxkbcommon
+          curl -fsSL -o .work/src/xkeyboard-config.tar.gz https://gitlab.freedesktop.org/xkeyboard-config/xkeyboard-config/-/archive/xkeyboard-config-2.44/xkeyboard-config-xkeyboard-config-2.44.tar.gz
+          tar -xzf .work/src/xkeyboard-config.tar.gz -C .work/src
+          meson setup .work/src/xkeyboard-config-build .work/src/xkeyboard-config-xkeyboard-config-2.44 -Dnls=false --prefix="$GITHUB_WORKSPACE/.work/src/xkc-install"
+          meson install -C .work/src/xkeyboard-config-build
+          meson setup .work/src/libxkbcommon-build .work/src/libxkbcommon -Denable-x11=false -Denable-wayland=false -Denable-docs=false -Denable-tools=false -Denable-xkbregistry=false -Denable-bash-completion=false -Dxkb-config-root="$GITHUB_WORKSPACE/.work/src/xkc-install/share/X11/xkb"
+          ninja -C .work/src/libxkbcommon-build
+      - name: test
+        env:
+          KBVM_XKBCOMMON_XKB_ROOT: "${{ github.workspace }}/.work/src/xkc-install/share/X11/xkb"
+        run: make test

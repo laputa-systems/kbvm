@@ -1,0 +1,36 @@
+name: lint
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions: {}
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.head_ref || github.run_id }}"
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-26.04-arm
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: true
+      - name: build libxkbcommon
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build bison libxml2-dev
+          meson setup libxkbcommon/build libxkbcommon -Ddefault_library=static -Denable-x11=false -Denable-wayland=false
+          ninja -C libxkbcommon/build libxkbcommon.a
+      - name: lint
+        run: make lint

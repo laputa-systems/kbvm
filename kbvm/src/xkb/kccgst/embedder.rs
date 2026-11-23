@@ -52,7 +52,7 @@ macro_rules! s {
                 fn embed(decl: &mut DirectOrIncluded<Self>) {
                     if let DirectOrIncluded::Direct($decl::Include(i)) = decl {
                         if let Some(loaded) = i.loaded.take() {
-                            let mut components = vec!();
+                            let mut components = vec![];
                             embed_config_item_type2(&mut components, loaded);
                             *decl = DirectOrIncluded::Included(Included {
                                 components: components.into_boxed_slice(),
