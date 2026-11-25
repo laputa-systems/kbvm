@@ -19,6 +19,7 @@ jobs:
   test:
     name: test
     runs-on: ubuntu-26.04-arm
+    timeout-minutes: 60
     permissions:
       contents: read
     steps:
@@ -26,10 +27,14 @@ jobs:
         with:
           persist-credentials: false
           submodules: true
+      - uses: laputa-systems/buildlib/setup@1cd9d482a684e72c68ac6fea7f4ee3a3e9c4a161 # v0.3.1
+        with:
+          tools: gluon
+          lock: .github/tools.lock.json
       - name: build libxkbcommon
         run: |
           sudo apt-get update
-          sudo apt-get install -y meson ninja-build bison pkg-config libxml2-dev libx11-data xkb-data xsltproc
+          sudo apt-get install -y bison pkg-config libxml2-dev libx11-data xkb-data xsltproc
           meson setup libxkbcommon/build libxkbcommon -Ddefault_library=static -Denable-x11=false -Denable-wayland=false
           ninja -C libxkbcommon/build libxkbcommon.a
       - name: build test oracle
